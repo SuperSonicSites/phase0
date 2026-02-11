@@ -1,186 +1,174 @@
-# Ralph-Ready Phase 0 Plan
-
-## GovPal — Local RAG Prototype + Eval Harness (Nonstop Run)
-
-### 0) Ralph Run Contract
-
-**Mission:** Produce a working local RAG prototype (ingest → retrieve/rerank → answer w/ citations) plus an evaluation harness that yields a **binary decision**: **GO / GO* / NO-GO**.
-
-**Single source of truth for completion:**
-✅ Work is complete **only** when:
-
-* `python scripts/check_done.py` returns exit code **0**
-
-If it returns **1**, the run is not done, regardless of “it looks good.”
-
-**Nonstop execution:**
-This plan is designed for **continuous iteration** until DONE or a hard stop is reached (runtime/cost/no-progress).
+Here are the **updated sections** you can drop straight into your Ralph plan (and then I’m also including a **fully rewritten plan** with these changes integrated).
 
 ---
 
-## 1) Definition of Done (Binary)
+## Updated sections to insert into the Ralph plan
 
-A run is DONE when all of the following are true **from a fresh clone** (only `.env` edits allowed):
+### A) Document Tiering Policy
 
-1. `make setup` succeeds
-2. `make ingest` succeeds
-3. `make eval` succeeds and writes `reports/eval-latest.json`
-4. `make ui` launches Streamlit UI and answers questions with citations
-5. Quality thresholds pass:
+**Rule:** Every ingested document must be assigned exactly one tier **before** any OCR/PII/chunking/embedding. Tier is persisted in (1) the raw manifest and (2) every chunk’s metadata in the vector store.
 
-   * **GO*** thresholds met on the full eval set:
+**Tier definitions**
 
-     * recall ≥ **70%**
-     * citation coverage ≥ **80%**
-     * hallucination ≤ **5%**
-   * **GO** requires GO* thresholds also pass on **real-data subset** *if real docs exist*
-6. `python scripts/check_done.py` exits **0**
+* **Tier 1 — Normative / stable rules (low PII, policy text)**
+
+  * Examples: bylaws, zoning bylaw text, OCP policies, official regulations, schedules that are purely regulatory.
+* **Tier 2 — Proceedings / meeting artifacts (incidental PII is common)**
+
+  * Examples: council minutes, agendas, public hearing minutes, committee minutes.
+* **Tier 3 — Attachments / mixed / unstructured (highest PII + noise risk)**
+
+  * Examples: appendices/exhibits, letters/emails from the public, submissions, forms, scanned attachments, complaint logs, anything “misc.”
+
+**Classification method (deterministic)**
+
+* Classification uses a deterministic rule set (filename patterns + folder conventions + first-page heuristics).
+* **Safe default:** If uncertain, classify as **Tier 3**.
 
 ---
 
-## 2) Scope Boundaries (Phase 0)
+### B) Tier-Specific Processing Pipeline (PII + Embeddings)
+
+**Core principle:** **Minutes must be PII scrubbed; bylaws do not need scrubbing.**
+So PII is *not universal*—it’s tier-dependent.
+
+#### Tier 1 processing
+
+* OCR → text cleanup → chunking → embedding → index
+* **PII stage: skipped by default**
+* Rationale: keep maximal fidelity for retrieval and citations.
+
+#### Tier 2 processing
+
+* OCR → **PII detection + redaction** → text cleanup → chunking → embedding → index
+* **PII redaction is mandatory before embeddings**
+* Store:
+
+  * `redacted_text`
+  * `pii_report` summary (counts/types) per doc
+
+#### Tier 3 processing
+
+* OCR → **PII detection + redaction (stricter)** → cleanup → chunking → embedding → index
+* **Stricter redaction** than Tier 2 (more detectors, lower thresholds).
+* Optional safety valve:
+
+  * If “PII density” exceeds a threshold (e.g., findings/page), mark doc as `do_not_embed=true` and store only an excerpt index or metadata-only record.
+
+**Non-negotiable invariant:** PII from Tier 2/3 must never enter the vector store.
+
+---
+
+### C) Tier-Specific Answer Policy (Generation Rules)
+
+The answering stage must respect tier semantics:
+
+* **Tier 1**: May synthesize across multiple sources, but every factual statement must cite `[doc_id, page, snippet]`.
+* **Tier 2**: Must be **excerpt-first**. Prefer quoting/snippets + citation. Avoid broad synthesis and speculation.
+* **Tier 3**: Quote/cite only. If the request would require interpretation of messy attachments, the system should refuse or ask the user to narrow scope.
+
+---
+
+### D) Required Audit Artifact + DONE Checks
+
+Add a new required report:
+
+**`reports/tier-policy-audit.md`**
+Must include:
+
+* counts of docs by tier
+* sample doc IDs per tier
+* confirmation:
+
+  * Tier 1 bypassed PII
+  * Tier 2/3 ran PII redaction before embeddings
+* PII summary for Tier 2 and Tier 3 (counts/types)
+* count of docs flagged `do_not_embed=true`
+
+**Update DONE logic (check_done.py) to verify:**
+
+* 100% of ingested docs have a tier
+* 100% of chunks in vector store contain `tier` metadata
+* Tier 2/3 chunks are marked as `redacted=true` (or equivalent) and Tier 1 are `redacted=false`
+* `tier-policy-audit.md` exists and references the latest run
+
+---
+
+# Fully rewritten Ralph plan (nonstop + tier-aware)
+
+## 0) Ralph Run Contract
+
+**Mission:** Build a local Phase 0 RAG prototype + eval harness that yields a binary decision (**GO / GO* / NO-GO**) using mechanical verification.
+
+**Single DONE gate:** `python scripts/check_done.py` exits `0`.
+
+**Nonstop mode:** Continuous iterations until DONE or hard stop triggers.
+
+---
+
+## 1) Scope (Phase 0)
 
 ### In scope
 
-* Local Python prototype (no production infra)
-* PDF ingestion pipeline:
-
-  * OCR (Marker, local)
-  * PII redaction (Presidio, local)
-  * chunking
-  * embeddings
-  * local persistent vector store (ChromaDB)
-* Query pipeline:
-
-  * embed query → retrieve → rerank → generate answer with citations
-* Evaluation harness:
-
-  * gold Q/A set
-  * claim-level scoring
-  * JSON + Markdown report artifacts
-* Streamlit UI prototype
+* PDF ingestion (OCR → tiering → tier-appropriate PII → chunk → embed → ChromaDB)
+* Query pipeline (retrieve → rerank → answer w/ citations + tier rules)
+* Eval harness (claim-level scoring + unanswerables + JSON reports)
+* Streamlit prototype UI
 
 ### Out of scope
 
-* Scraping automation at scale
-* Production deployment, auth, billing, CI/CD
-* “Real product” UX polish
-* Cloud DB/hosting (beyond model APIs)
+* Production infra, auth, CI/CD, deployment, large-scale scraping.
 
-**Rule:** If it doesn’t move the metrics toward DONE, it’s out of scope.
+**Rule:** If it doesn’t measurably improve eval toward DONE, it’s out of scope.
 
 ---
 
-## 3) Non-Negotiable Constraints (Guardrails)
+## 2) Hard Stops (Safety + Convergence)
 
-These are hard rules to prevent false “GO” and unsafe behavior:
+Stop immediately if:
 
-1. **Claim-level citations required**
-   Every factual sentence must cite `[doc_id, page, snippet/section]` or the system must refuse.
-
-2. **Tier behavior enforced**
-
-   * Tier 1 (bylaws, OCPs, zoning) can be synthesized with citations.
-   * Tier 2 (minutes/agenda) must be excerpt-first and avoid speculative synthesis.
-
-3. **PII before vectors**
-   PII redaction is applied only to Tier 2 documents and must occur before embeddings. Tier 1 documents skip PII redaction by default. Tier classification is required for every document and is stored in the raw manifest and chunk metadata. Any unclassified document defaults to Tier 3.
-
-4. **Deterministic evaluation**
-   All eval-time LLM calls use `temperature=0`. All configs logged.
-
-5. **No legal opinions**
-   Prompts must enforce: summarize the documents, don’t provide legal advice, don’t interpret beyond citation.
-
-6. **No secrets in repo**
-   `.env` must be ignored and never printed in logs.
-
-7. **Pinned dependencies**
-   Use a lockfile (uv/requirements) and keep a single reproducible setup path.
+* `check_done.py` returns `0`
+* runtime exceeds `T` (default: 12h)
+* spend exceeds `$B` (default: $20)
+* no improvement after `N` iterations (default: 6)
+* agent proposes blocked actions (deploy, secrets rotation, destructive ops, broad network access)
 
 ---
 
-## 4) Inputs (What the run requires)
+## 3) Inputs
 
-### 4.1 Source documents
+### Documents
 
-Minimum:
+* Minimum: 20 PDFs total
+* Provenance: real vs synthetic tracked in `data/raw/.../manifest.json`
 
-* ≥ **20 PDFs** mixed across Tier 1 and Tier 2
+### Eval set
 
-Provenance:
-
-* Real vs synthetic must be tracked in a manifest (so the eval can report both).
-
-### 4.2 Evaluation dataset
-
-Minimum:
-
-* ≥ **30 Q/A items**
-* Must include:
-
-  * `expected_claims` (for claim-level scoring)
-  * ≥ **3 unanswerable** questions
-* The eval set becomes **immutable** after baseline is established (anti-gaming).
-
-### 4.3 Directory conventions
-
-Use stable directories so the agent can operate without guessing:
-
-* `data/raw/...` for PDFs
-* `data/processed/...` for OCR + redacted text + chunks
-* `data/chroma/...` for persistent ChromaDB
-* `eval/...` for the eval set
-* `reports/...` for all benchmark outputs
+* Minimum: 30 Q/A
+* Includes `expected_claims` and ≥3 unanswerables
+* Eval set becomes immutable after baseline is created
 
 ---
 
-## 5) Dependencies & External APIs
+## 4) Tiering and Policies (Mandatory)
 
-### External services (API calls)
+### 4.1 Tiering policy
 
-* LLM: Claude (or the designated Anthropic model)
-* Embeddings: Cohere embeddings
-* Rerank: Cohere reranker
+(Insert **Document Tiering Policy** section A)
 
-### Local dependencies
+### 4.2 Tier-specific processing
 
-* OCR: Marker
-* PII: Presidio
-* Vector store: ChromaDB persistent
+(Insert **Tier-Specific Processing Pipeline** section B)
 
-**Credential rule:** only `.env` contains keys; never hardcode.
+### 4.3 Tier-specific answering
+
+(Insert **Tier-Specific Answer Policy** section C)
 
 ---
 
-## 6) Repo Deliverables (Hard requirements)
+## 5) Required command surface (one happy path)
 
-The run must output these artifacts (and `check_done.py` should validate presence + freshness):
-
-### Core outputs
-
-* `reports/eval-latest.json`
-* `reports/eval-latest.md` (human-readable summary)
-* `reports/eval-baseline.json`
-* `reports/eval-best.json` (best run so far)
-* `prototype/app.py` Streamlit UI
-* Prompt files for Tier 1 + Tier 2 + judge/eval prompts
-* `docs/architecture-phase0.md` (pipeline + data model summary)
-* `reports/iteration-log.md` (every iteration recorded)
-
-### Benchmarks (must exist, even if “rough”)
-
-* `reports/ocr-benchmark.md`
-* `reports/presidio-benchmark.md`
-* `reports/chunking-benchmark.md`
-
----
-
-## 7) Command Surface (One happy path)
-
-A Ralph run only works if there’s a single deterministic way to run it.
-
-Required Makefile targets:
+From a fresh clone (only `.env` edits):
 
 * `make setup`
 * `make ingest`
@@ -189,180 +177,98 @@ Required Makefile targets:
 * `make check-done`
 * `make iterate` (recommended): clean → ingest → eval
 
-**Rule:** The agent must never invent its own run sequence; it uses these.
+**Rule:** The agent must not invent a custom run sequence.
 
 ---
 
-## 8) Internal API Contracts (So the agent can’t “wing it”)
+## 6) Required artifacts
 
-Define stable module/function boundaries so iteration doesn’t turn into refactors.
+### Core
 
-### Ingestion
+* `reports/eval-latest.json` + `reports/eval-latest.md`
+* `reports/eval-baseline.json`
+* `reports/eval-best.json`
+* `reports/iteration-log.md`
+* `docs/architecture-phase0.md`
+* `prototype/app.py` (Streamlit)
+* prompt files (Tier 1, Tier 2, eval/judge)
 
-* Input: PDFs + manifest
-* Output: OCR text, redacted text, chunk objects, metadata
+### Benchmarks
 
-### Chunking
+* `reports/ocr-benchmark.md`
+* `reports/presidio-benchmark.md`
+* `reports/chunking-benchmark.md`
 
-* Strategy: one of a small set (e.g., fixed / markdown / sentence)
-* Must preserve metadata: `doc_id`, `page`, `section`, offsets/snippets
+### New required audit
 
-### PII
-
-* Must emit:
-
-  * redacted text
-  * PII report (counts/types)
-* Must run before embedding
-
-### Retrieval / Rerank
-
-* Must output:
-
-  * retrieved chunk IDs
-  * reranked list
-  * final cited support set
-
-### Answering
-
-* Must produce:
-
-  * answer text
-  * citation map per claim/sentence
-
-### Evaluation
-
-* Must compute:
-
-  * recall (% claims matched)
-  * citation coverage (% claims with valid citation)
-  * hallucination (% claims unsupported)
+* `reports/tier-policy-audit.md` (see Section D)
 
 ---
 
-# 9) Nonstop Ralph Loop (The heart of the plan)
+## 7) Eval metrics and decision policy
 
-## 9.1 Global Hard Stops
+**Quality thresholds (example; keep your current numbers):**
 
-Stop immediately if any of these triggers:
+* recall ≥ 70%
+* citation coverage ≥ 80%
+* hallucination ≤ 5%
 
-* ✅ `python scripts/check_done.py` exits **0**
-* Runtime exceeds **T** (default suggestion: 12 hours)
-* Cost exceeds **$B** (default suggestion: $20)
-* No improvement in the primary failing metric after **N** iterations (default: 6)
-* A blocked action is proposed (prod deploy, secrets changes, deleting raw datasets, widening network access, etc.)
+**Decisions**
 
-## 9.2 Baseline + Best-So-Far
-
-* First successful end-to-end eval becomes **baseline**:
-
-  * `reports/eval-baseline.json`
-* Every subsequent iteration compares against:
-
-  * baseline
-  * best-so-far (`reports/eval-best.json`)
-
-## 9.3 Allowed Changes (Phase 0 only)
-
-The agent may only change:
-
-* chunking strategy/parameters
-* retrieval parameters (top_k, filters)
-* rerank parameters (rerank_top_n)
-* prompts (Tier 1/Tier 2/judge)
-* PII thresholds/rules (only if benchmarks justify it)
-* bugfixes in ingestion/citation propagation
-
-**Not allowed:**
-
-* new product features
-* major refactors
-* swapping stack
-* building infra/deployments
-
-## 9.4 Iteration Procedure (must follow every time)
-
-Each iteration must do **exactly** this:
-
-1. **Select target**
-   Identify the single worst failing metric (or smallest margin to threshold).
-
-2. **Diagnose**
-   Write 1–3 bullets on why it’s failing, using logs + eval outputs.
-
-3. **Make one atomic change**
-   One conceptual change only (single knob or single prompt edit).
-
-4. **Run**
-
-   * `make iterate` (or `make ingest && make eval`)
-   * ensure artifacts updated
-
-5. **Compare**
-
-   * If any gating metric regresses below threshold or worsens materially → **revert**
-   * If target metric improves without unacceptable regressions → **keep**
-   * Update `eval-best.json` only when it’s strictly better than current best
-
-6. **Log**
-   Append to `reports/iteration-log.md`:
-
-   * iteration #
-   * change summary
-   * before/after metrics
-   * keep/revert decision + reason
-
-7. **Check DONE**
-
-   * run `python scripts/check_done.py`
-
-## 9.5 Checkpoints (for nonstop control)
-
-Every **3 iterations** (or every **90 minutes**, whichever comes first), write `reports/checkpoint.md` containing:
-
-* current best metrics
-* top remaining failure modes
-* next 1–2 planned interventions
-* any anomalies (flaky OCR, citation mismatch, etc.)
-
-If the agent cannot produce a coherent checkpoint → stop (it’s drifting).
+* **GO***: thresholds met on full eval set
+* **GO**: thresholds met on real-data subset (when real eval exists)
+* **NO-GO**: thresholds not met after iteration limit / hard stop
 
 ---
 
-## 10) Final Output: GO / GO* / NO-GO
+## 8) Nonstop Ralph Loop (repeat until stop)
 
-At the end of the run, the agent must output:
+### 8.1 Baseline
 
-* **GO*** if thresholds pass on the full eval set
-* **GO** if thresholds pass on real-data subset (when real docs exist)
-* **NO-GO** if it fails after iteration limit or hits hard stop
+* Run `make ingest && make eval`
+* Save as `reports/eval-baseline.json`
 
-Also include a short final report:
+### 8.2 Allowed changes (Phase 0 only)
 
-* what changed
-* what improved
-* what is still weak
-* recommended next step (Phase 1 or fix list)
+* chunking strategy/params
+* retrieval params (top_k, filters)
+* rerank params (rerank_top_n)
+* Tier 1/Tier 2 prompts, eval prompts
+* Tier 2/3 PII thresholds/detectors
+* bug fixes in ingestion/citation metadata propagation
+
+**Not allowed:** architecture rewrites, stack swaps, new features.
+
+### 8.3 Iteration procedure (mandatory)
+
+Each iteration:
+
+1. Identify weakest failing metric
+2. Hypothesize cause (1–3 bullets)
+3. Make **one** atomic change
+4. Run `make iterate`
+5. Compare to baseline + best
+
+   * regressions on gating metrics → revert immediately
+   * improvements without unacceptable regressions → keep, update `eval-best.json`
+6. Append to `reports/iteration-log.md`
+7. Run `make check-done`
+
+### 8.4 Checkpoints
+
+Every 3 iterations or 90 minutes:
+
+* write `reports/checkpoint.md` with best metrics, remaining failures, next plan
+* ensure `tier-policy-audit.md` still matches the current run
+
+If the checkpoint can’t be produced coherently → stop.
 
 ---
 
-# What you did well (already Ralph-friendly)
+## 9) Finalization
 
-* You already defined **binary DONE** tied to an executable checker and a reproducible command path.
-* You picked concrete thresholds (recall, citation coverage, hallucination) rather than vibes.
-* You separated **GO vs GO*** to avoid synthetic-only confidence.
-* You included anti-gaming ideas (unanswerables, claim-level scoring).
-* You focused Phase 0 on proving the pipeline/evals instead of infra.
+When done or stopped:
 
-# What I improved in this rewrite
-
-* Removed “days” and converted everything to a **continuous loop** with **hard stops** (time/cost/no-progress).
-* Formalized the **iteration protocol** (atomic change → run → compare → keep/revert → log).
-* Added **baseline + best-so-far** mechanics so progress is monotonic and measurable.
-* Added explicit **allowed / not allowed changes** to prevent scope creep.
-* Added **checkpoint artifacts** to keep long runs controlled and debuggable.
-* Tightened deliverables into a **must-produce artifact list** so the agent can’t declare victory early.
-
----
-
-If you want, I can also rewrite this into a **single “Agent Run Prompt”** (copy/paste) that includes: role, tools allowed, exact commands, iteration template, and strict refusal rules — so you can hand it directly to your agent runner.
+* write a final summary (GO/GO*/NO-GO)
+* list what improved and what remains weak
+* ensure all required artifacts exist and are consistent
