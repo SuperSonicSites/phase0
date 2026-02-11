@@ -84,7 +84,7 @@ These are hard rules to prevent false “GO” and unsafe behavior:
    * Tier 2 (minutes/agenda) must be excerpt-first and avoid speculative synthesis.
 
 3. **PII before vectors**
-   PII must be removed **before embeddings** and must never enter the vector DB.
+   PII redaction is applied only to Tier 2 documents and must occur before embeddings. Tier 1 documents skip PII redaction by default. Tier classification is required for every document and is stored in the raw manifest and chunk metadata. Any unclassified document defaults to Tier 3.
 
 4. **Deterministic evaluation**
    All eval-time LLM calls use `temperature=0`. All configs logged.
